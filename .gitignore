@@ -1,0 +1,11 @@
+node_modules/
+.next/
+.vinext/
+dist/
+out/
+.wrangler/
+*.log
+.env*
+!.env.example
+.DS_Store
+Thumbs.db
