@@ -15,9 +15,10 @@ import {
   LockKeyhole,
   MapPinned,
   Mountain,
+  PanelLeftClose,
+  PanelLeftOpen,
   Palette,
   Route,
-  Settings2,
   X,
 } from 'lucide-react';
 
@@ -114,9 +115,16 @@ function addOperationalLayers(
       'source-layer': PROJECT_SOURCE_LAYER,
       layout: { visibility: visibility(settings.polygons) },
       paint: {
-        'fill-color': settings.polygonColor,
+        'fill-color': [
+          'case',
+          ['boolean', ['feature-state', 'selected'], false],
+          '#67e8ff',
+          settings.polygonColor,
+        ],
         'fill-opacity': [
           'case',
+          ['boolean', ['feature-state', 'selected'], false],
+          0.9,
           ['boolean', ['feature-state', 'hover'], false],
           Math.min(settings.polygonOpacity + 0.2, 1),
           settings.polygonOpacity,
@@ -130,6 +138,28 @@ function addOperationalLayers(
       'source-layer': PROJECT_SOURCE_LAYER,
       layout: { visibility: visibility(settings.polygons) },
       paint: { 'line-color': '#fff6df', 'line-width': 0.9, 'line-opacity': 0.9 },
+    });
+    map.addLayer({
+      id: 'idc-dmp-selected-outline',
+      type: 'line',
+      source: 'idc-dmp',
+      'source-layer': PROJECT_SOURCE_LAYER,
+      layout: { visibility: visibility(settings.polygons) },
+      paint: {
+        'line-color': '#ffffff',
+        'line-width': [
+          'case',
+          ['boolean', ['feature-state', 'selected'], false],
+          4,
+          0,
+        ],
+        'line-opacity': [
+          'case',
+          ['boolean', ['feature-state', 'selected'], false],
+          1,
+          0,
+        ],
+      },
     });
   }
 
@@ -231,6 +261,16 @@ function formatMetric(value: unknown, digits = 2): string {
   return numeric.toLocaleString('en-US', { maximumFractionDigits: digits });
 }
 
+function featureInfo(properties: Record<string, unknown> | null | undefined): HoverInfo | null {
+  if (!properties) return null;
+  return {
+    landuse: String(properties.Landuse ?? properties.Land_Type ?? '—'),
+    landarea: formatMetric(properties.Shape_Area),
+    far: formatMetric(properties.FAR_Num),
+    gfa: formatMetric(properties.GFA),
+  };
+}
+
 async function hashValue(value: string) {
   const buffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return Array.from(new Uint8Array(buffer))
@@ -243,6 +283,7 @@ export default function Home() {
   const mapRef = useRef<MapboxMap | null>(null);
   const markerRef = useRef<mapboxgl.Marker | null>(null);
   const hoveredIdRef = useRef<string | number | null>(null);
+  const selectedIdRef = useRef<string | number | null>(null);
   const pickingOriginRef = useRef(false);
   const settingsRef = useRef<MapSettings>(initialSettings);
   const originRef = useRef<[number, number]>(GELEPHU);
@@ -253,10 +294,11 @@ export default function Home() {
   const [passwordError, setPasswordError] = useState(false);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState('');
-  const [basemap, setBasemap] = useState<BasemapId>('light');
+  const [basemap, setBasemap] = useState<BasemapId>('satellite');
   const [settings, setSettings] = useState<MapSettings>(initialSettings);
   const [hoverInfo, setHoverInfo] = useState<HoverInfo | null>(null);
-  const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
+  const [selectedInfo, setSelectedInfo] = useState<HoverInfo | null>(null);
+  const [controlsOpen, setControlsOpen] = useState(true);
 
   const [isoPanelOpen, setIsoPanelOpen] = useState(false);
   const [isoMode, setIsoMode] = useState<IsoMode>('time');
@@ -274,7 +316,7 @@ export default function Home() {
     mapboxgl.accessToken = MAPBOX_TOKEN;
     const map = new mapboxgl.Map({
       container: mapContainer.current,
-      style: BASEMAPS.light.style,
+      style: BASEMAPS.satellite.style,
       center: GELEPHU,
       zoom: 11.35,
       pitch: 0,
@@ -312,14 +354,7 @@ export default function Home() {
         );
       }
 
-      const properties = feature.properties;
-      if (!properties) return;
-      setHoverInfo({
-        landuse: String(properties.Landuse ?? properties.Land_Type ?? '—'),
-        landarea: formatMetric(properties.Shape_Area),
-        far: formatMetric(properties.FAR_Num),
-        gfa: formatMetric(properties.GFA),
-      });
+      setHoverInfo(featureInfo(feature.properties as Record<string, unknown> | null));
     });
 
     map.on('mouseleave', 'idc-dmp-fill', () => {
@@ -335,16 +370,42 @@ export default function Home() {
     });
 
     map.on('click', (event) => {
-      if (!pickingOriginRef.current) return;
-      const nextOrigin: [number, number] = [event.lngLat.lng, event.lngLat.lat];
-      originRef.current = nextOrigin;
-      setOrigin(nextOrigin);
-      markerRef.current?.setLngLat(nextOrigin);
-      pickingOriginRef.current = false;
-      setPickingOrigin(false);
-      map.getCanvas().style.cursor = '';
-      setIsoStatus('idle');
-      setIsoMessage('Origin updated. Run the analysis when ready.');
+      if (pickingOriginRef.current) {
+        const nextOrigin: [number, number] = [event.lngLat.lng, event.lngLat.lat];
+        originRef.current = nextOrigin;
+        setOrigin(nextOrigin);
+        markerRef.current?.setLngLat(nextOrigin);
+        pickingOriginRef.current = false;
+        setPickingOrigin(false);
+        map.getCanvas().style.cursor = '';
+        setIsoStatus('idle');
+        setIsoMessage('Origin updated. Run the analysis when ready.');
+        return;
+      }
+
+      const features = map.getLayer('idc-dmp-fill')
+        ? map.queryRenderedFeatures(event.point, { layers: ['idc-dmp-fill'] })
+        : [];
+      const feature = features[0];
+
+      if (selectedIdRef.current !== null && map.getSource('idc-dmp')) {
+        map.setFeatureState(
+          { source: 'idc-dmp', sourceLayer: PROJECT_SOURCE_LAYER, id: selectedIdRef.current },
+          { selected: false },
+        );
+      }
+
+      if (feature?.id !== undefined) {
+        selectedIdRef.current = feature.id;
+        map.setFeatureState(
+          { source: 'idc-dmp', sourceLayer: PROJECT_SOURCE_LAYER, id: feature.id },
+          { selected: true },
+        );
+        setSelectedInfo(featureInfo(feature.properties as Record<string, unknown> | null));
+      } else {
+        selectedIdRef.current = null;
+        setSelectedInfo(null);
+      }
     });
 
     map.on('error', (event) => {
@@ -370,15 +431,23 @@ export default function Home() {
 
     safeSetVisibility(map, 'idc-dmp-fill', next.polygons);
     safeSetVisibility(map, 'idc-dmp-outline', next.polygons);
+    safeSetVisibility(map, 'idc-dmp-selected-outline', next.polygons);
     safeSetVisibility(map, 'contour-lines', next.contours);
     safeSetVisibility(map, 'custom-3d-buildings', next.buildings);
     safeSetVisibility(map, 'mapbox-boundaries', next.boundaries);
     safeSetVisibility(map, 'mapbox-boundaries-disputed', next.boundaries);
 
     if (map.getLayer('idc-dmp-fill')) {
-      map.setPaintProperty('idc-dmp-fill', 'fill-color', next.polygonColor);
+      map.setPaintProperty('idc-dmp-fill', 'fill-color', [
+        'case',
+        ['boolean', ['feature-state', 'selected'], false],
+        '#67e8ff',
+        next.polygonColor,
+      ]);
       map.setPaintProperty('idc-dmp-fill', 'fill-opacity', [
         'case',
+        ['boolean', ['feature-state', 'selected'], false],
+        0.9,
         ['boolean', ['feature-state', 'hover'], false],
         Math.min(next.polygonOpacity + 0.2, 1),
         next.polygonOpacity,
@@ -409,6 +478,12 @@ export default function Home() {
     map.setStyle(BASEMAPS[nextBasemap].style);
     map.once('style.load', () => {
       addOperationalLayers(map, settingsRef.current, isochroneDataRef.current);
+      if (selectedIdRef.current !== null) {
+        map.setFeatureState(
+          { source: 'idc-dmp', sourceLayer: PROJECT_SOURCE_LAYER, id: selectedIdRef.current },
+          { selected: true },
+        );
+      }
       if (settingsRef.current.view3D) {
         map.setTerrain({ source: 'terrain-dem', exaggeration: 1.25 });
       }
@@ -455,7 +530,7 @@ export default function Home() {
     setIsoPanelOpen(nextOpen);
     if (nextOpen) {
       ensureOriginMarker();
-      setMobilePanelOpen(false);
+      setControlsOpen(false);
     } else {
       pickingOriginRef.current = false;
       setPickingOrigin(false);
@@ -552,12 +627,12 @@ export default function Home() {
         </div>
         <div className="topbar-actions">
           <button
-            className="icon-action mobile-settings"
-            onClick={() => { setMobilePanelOpen(!mobilePanelOpen); setIsoPanelOpen(false); }}
-            aria-label="Open map settings"
-            aria-pressed={mobilePanelOpen}
-            title="Map settings"
-          ><Settings2 size={17} /></button>
+            className="icon-action controls-toggle"
+            onClick={() => { setControlsOpen(!controlsOpen); setIsoPanelOpen(false); }}
+            aria-label={controlsOpen ? 'Hide map tools' : 'Show map tools'}
+            aria-pressed={controlsOpen}
+            title={controlsOpen ? 'Hide map tools' : 'Show map tools'}
+          >{controlsOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}</button>
           <button
             className="text-action"
             onClick={() => mapRef.current?.flyTo({ center: GELEPHU, zoom: 11.35, duration: 900 })}
@@ -569,10 +644,10 @@ export default function Home() {
         </div>
       </header>
 
-      <aside className={`control-rail ${mobilePanelOpen ? 'is-open' : ''}`} aria-label="Map controls">
+      <aside className={`control-rail ${controlsOpen ? 'is-open' : 'is-hidden'}`} aria-label="Map controls">
         <div className="panel-heading">
           <div><span className="eyebrow">MAP DISPLAY</span><h2>Explore the plan</h2></div>
-          <Layers3 size={20} />
+          <button className="panel-close" onClick={() => setControlsOpen(false)} aria-label="Hide map tools"><X size={17} /></button>
         </div>
 
         <div className="control-group">
@@ -716,15 +791,16 @@ export default function Home() {
         </aside>
       )}
 
-      {hoverInfo && !isoPanelOpen && (
-        <section className="feature-card" aria-live="polite">
-          <div className="feature-card__title"><span />Polygon information</div>
+      {(selectedInfo ?? hoverInfo) && !isoPanelOpen && (
+        <section className={`feature-card ${selectedInfo ? 'is-selected' : ''}`} aria-live="polite">
+          <div className="feature-card__title"><span />{selectedInfo ? 'Selected area' : 'Quick look'}</div>
           <dl>
-            <div><dt>Landuse</dt><dd>{hoverInfo.landuse}</dd></div>
-            <div><dt>Landarea</dt><dd>{hoverInfo.landarea} m²</dd></div>
-            <div><dt>FAR</dt><dd>{hoverInfo.far}</dd></div>
-            <div><dt>GFA</dt><dd>{hoverInfo.gfa} m²</dd></div>
+            <div className="feature-card__wide"><dt>Landuse</dt><dd>{(selectedInfo ?? hoverInfo)?.landuse}</dd></div>
+            <div><dt>Landarea</dt><dd>{(selectedInfo ?? hoverInfo)?.landarea}<small>m²</small></dd></div>
+            <div><dt>FAR</dt><dd>{(selectedInfo ?? hoverInfo)?.far}</dd></div>
+            <div className="feature-card__wide"><dt>GFA</dt><dd>{(selectedInfo ?? hoverInfo)?.gfa}<small>m²</small></dd></div>
           </dl>
+          {selectedInfo && <p className="selection-hint">Click empty map space to clear selection.</p>}
         </section>
       )}
 
@@ -806,3 +882,4 @@ function ProfileButton({
     </button>
   );
 }
+
